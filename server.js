@@ -3,6 +3,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const compression = require('compression');
 const morgan = require('morgan');
+const axios = require('axios');
 require('dotenv').config();
 
 const app = express();
@@ -11,8 +12,8 @@ const PORT = process.env.PORT || 3000;
 // Middleware
 app.use(helmet());
 app.use(cors({
-    origin: ['http://localhost:5500', 'http://localhost:3000', 'https://apgshimla.edu.in', '*'],
-    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    origin: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(compression());
@@ -87,50 +88,64 @@ app.get('/api/categories/:category', (req, res) => {
     res.json({ count: result.length, data: result });
 });
 
-// Calculate directions (using Haversine + path estimation)
-app.get('/api/directions', (req, res) => {
-    const { fromLat, fromLng, toLat, toLng } = req.query;
-    if (!fromLat || !fromLng || !toLat || !toLng) {
-        return res.status(400).json({ error: 'Missing coordinates. Required: fromLat, fromLng, toLat, toLng' });
+// Calculate pedestrian directions using Valhalla's OpenStreetMap routing engine.
+// If the public router is temporarily unavailable, return a clearly-labelled
+// geometric fallback rather than failing the entire navigation experience.
+function decodePolyline6(encoded) {
+    let index = 0, lat = 0, lng = 0, coordinates = [];
+    while (index < encoded.length) {
+        let result = 0, shift = 0, byte;
+        do { byte = encoded.charCodeAt(index++) - 63; result |= (byte & 0x1f) << shift; shift += 5; } while (byte >= 0x20);
+        lat += (result & 1) ? ~(result >> 1) : (result >> 1);
+        result = 0; shift = 0;
+        do { byte = encoded.charCodeAt(index++) - 63; result |= (byte & 0x1f) << shift; shift += 5; } while (byte >= 0x20);
+        lng += (result & 1) ? ~(result >> 1) : (result >> 1);
+        coordinates.push([lat / 1e6, lng / 1e6]);
     }
+    return coordinates;
+}
 
-    const lat1 = parseFloat(fromLat), lng1 = parseFloat(fromLng);
-    const lat2 = parseFloat(toLat), lng2 = parseFloat(toLng);
-
-    // Haversine distance
-    const R = 6371;
-    const dLat = (lat2 - lat1) * Math.PI / 180;
-    const dLon = (lng2 - lng1) * Math.PI / 180;
-    const a = Math.sin(dLat/2)**2 + Math.cos(lat1 * Math.PI/180) * Math.cos(lat2 * Math.PI/180) * Math.sin(dLon/2)**2;
-    const distance = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-
-    // Walking time (~5 km/h)
-    const duration = Math.ceil(distance / 5 * 60);
-    const steps = Math.ceil(distance * 1000 / 0.7);
-
-    // Generate path points (simple interpolation - in production use OSRM)
-    const points = 20;
-    const path = [];
-    for (let i = 0; i <= points; i++) {
-        const t = i / points;
-        // Add slight curve for realism
-        const offset = Math.sin(t * Math.PI) * 0.0002;
-        path.push([
-            lat1 + (lat2 - lat1) * t + offset,
-            lng1 + (lng2 - lng1) * t
-        ]);
-    }
-
-    res.json({
-        from: { lat: lat1, lng: lng1 },
-        to: { lat: lat2, lng: lng2 },
-        distance: parseFloat(distance.toFixed(3)),
-        duration,
-        steps,
-        path,
-        unit: 'km',
-        mode: 'walking'
+function geometricRoute(lat1, lng1, lat2, lng2) {
+    const distance = getDistance(lat1, lng1, lat2, lng2);
+    const duration = Math.max(1, Math.ceil(distance / 5 * 60));
+    const steps = Math.max(1, Math.ceil(distance * 1000 / 0.7));
+    const path = Array.from({ length: 21 }, (_, i) => {
+        const t = i / 20;
+        return [lat1 + (lat2 - lat1) * t, lng1 + (lng2 - lng1) * t];
     });
+    return { distance: Number(distance.toFixed(3)), duration, steps, path, instructions: [], fallback: true };
+}
+
+app.get('/api/directions', async (req, res) => {
+    const { fromLat, fromLng, toLat, toLng } = req.query;
+    const lat1 = Number(fromLat), lng1 = Number(fromLng), lat2 = Number(toLat), lng2 = Number(toLng);
+    if (![lat1, lng1, lat2, lng2].every(Number.isFinite)) {
+        return res.status(400).json({ error: 'Valid fromLat, fromLng, toLat, and toLng coordinates are required.' });
+    }
+
+    try {
+        const response = await axios.post('https://valhalla1.openstreetmap.de/route', {
+            locations: [{ lat: lat1, lon: lng1 }, { lat: lat2, lon: lng2 }],
+            costing: 'pedestrian',
+            units: 'kilometers',
+            directions_options: { units: 'kilometers' }
+        }, { timeout: 12000, headers: { 'Content-Type': 'application/json' } });
+        const trip = response.data?.trip;
+        const leg = trip?.legs?.[0];
+        if (!trip || !leg?.shape) throw new Error('Pedestrian router returned no route shape');
+        const route = {
+            distance: Number(trip.summary.length.toFixed(3)),
+            duration: Math.max(1, Math.ceil(trip.summary.time / 60)),
+            steps: Math.max(1, Math.ceil(trip.summary.length * 1000 / 0.7)),
+            path: decodePolyline6(leg.shape),
+            instructions: (leg.maneuvers || []).map(m => ({ instruction: m.instruction, distance: Number((m.length || 0).toFixed(2)), time: Math.ceil((m.time || 0) / 60) })),
+            fallback: false
+        };
+        return res.json({ from: { lat: lat1, lng: lng1 }, to: { lat: lat2, lng: lng2 }, unit: 'km', mode: 'walking', ...route });
+    } catch (error) {
+        console.warn('Pedestrian routing unavailable:', error.message);
+        return res.json({ from: { lat: lat1, lng: lng1 }, to: { lat: lat2, lng: lng2 }, unit: 'km', mode: 'walking', ...geometricRoute(lat1, lng1, lat2, lng2) });
+    }
 });
 
 // Find nearest building
