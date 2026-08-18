@@ -4,7 +4,7 @@ A browser-based campus map and walking navigator for APG Shimla University.
 
 ## What is included
 
-The frontend is available from `index.html` and retains the original Leaflet/OpenStreetMap map interface. The updated directions flow supports a user’s current location as the starting point, continuous high-accuracy location updates, accuracy feedback, permission/error guidance, automatic route refresh while moving, and turn instructions when the pedestrian routing service returns them.
+The frontend is available from `index.html` and retains the original Leaflet/OpenStreetMap map interface. The updated directions flow is destination-first: it uses the user’s exact live GPS position automatically, continuously tracks movement, shows accuracy and permission status, refreshes the route while moving, and provides turn instructions when the pedestrian routing service returns them. Users can enable browser voice guidance for spoken instructions and arrival announcements.
 
 The backend in `server.js` exposes the existing campus data APIs and now uses the OpenStreetMap Valhalla pedestrian router for mapped walking paths. If the external router is temporarily unavailable, the API returns an explicitly labelled approximate fallback instead of silently presenting a synthetic route as road guidance.
 

@@ -48,11 +48,16 @@
         .dir-input-group.to i { color: #dc2626; }
         .route-btn { width: 100%; padding: 12px; background: var(--primary); color: white; border: none; border-radius: 10px; font-family: inherit; font-weight: 600; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 8px; }
         .route-btn:hover { background: var(--primary-light); transform: translateY(-1px); }
+        .voice-row { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
+        .voice-btn { padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: white; color: var(--primary); font: 600 0.75rem inherit; cursor: pointer; }
+        .voice-btn:hover { background: #ecfdf5; }
+        .voice-hint { font-size: 0.72rem; color: var(--text-muted); }
         .location-status { margin-top: 10px; font-size: 0.78rem; color: var(--text-muted); display: flex; align-items: center; gap: 7px; line-height: 1.35; }
         .location-status.success { color: var(--primary); }
         .location-status.error { color: #b91c1c; }
         .use-location-btn { border: 0; background: transparent; color: var(--primary); cursor: pointer; font: inherit; font-size: 0.78rem; font-weight: 600; padding: 0; white-space: nowrap; }
         .route-source-note { font-size: 0.76rem; color: var(--text-muted); margin-top: 6px; }
+        .current-step { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: #ecfdf5; color: #166534; font-size: 0.82rem; font-weight: 600; line-height: 1.35; }
         .route-steps { max-height: 180px; overflow-y: auto; margin: 10px 0 0; padding-left: 20px; color: var(--text-muted); font-size: 0.78rem; line-height: 1.45; }
         .route-steps li { margin-bottom: 6px; padding-left: 2px; }
         .filters { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; }
@@ -148,10 +153,10 @@
                     <i class="fas fa-chevron-down" id="dirChevron" style="margin-left:auto;transition:transform 0.3s"></i>
                 </div>
                 <div class="directions-inputs" id="dirInputs">
-                    <div class="dir-input-group from"><i class="fas fa-circle" style="font-size:0.6rem"></i><input type="text" id="fromInput" placeholder="From a building or use your location" list="buildingsList"><button class="use-location-btn" type="button" onclick="useCurrentLocation()" title="Use current location"><i class="fas fa-crosshairs"></i></button></div>
-                    <div class="dir-input-group to"><i class="fas fa-location-dot"></i><input type="text" id="toInput" placeholder="To (e.g., Library)" list="buildingsList"></div>
-                    <button class="route-btn" onclick="calculateRoute()"><i class="fas fa-paper-plane"></i> Show Route</button>
-                    <div id="locationStatus" class="location-status"><i class="fas fa-location-crosshairs"></i><span>Location is off. Allow browser location access for live navigation.</span></div>
+                    <div class="dir-input-group to"><i class="fas fa-location-dot"></i><input type="text" id="toInput" placeholder="Where do you want to go?" list="buildingsList"></div>
+                    <button class="route-btn" onclick="calculateRoute()"><i class="fas fa-location-arrow"></i> Start Navigation</button>
+                    <div class="voice-row"><button class="voice-btn" id="voiceToggle" type="button" onclick="toggleVoiceGuidance()"><i class="fas fa-volume-xmark"></i> Voice off</button><span class="voice-hint">Turn-by-turn audio</span></div>
+                    <div id="locationStatus" class="location-status"><i class="fas fa-location-crosshairs"></i><span>Live GPS starts automatically when you begin navigation.</span></div>
                 </div>
             </div>
             <div class="filters">
@@ -174,8 +179,9 @@
                 <div class="route-stat"><i class="fas fa-clock"></i> <span id="routeTime">-</span></div>
                 <div class="route-stat"><i class="fas fa-shoe-prints"></i> <span id="routeSteps">-</span></div>
                 <div id="routeSourceNote" class="route-source-note"></div>
+                <div id="currentStep" class="current-step" aria-live="polite">Choose a destination to start navigation.</div>
                 <ol id="routeInstructions" class="route-steps"></ol>
-                <button class="popup-btn" style="margin-top:10px;width:100%" onclick="clearRoute()"><i class="fas fa-times"></i> Clear Route</button>
+                <button class="popup-btn" style="margin-top:10px;width:100%" onclick="clearRoute()"><i class="fas fa-times"></i> End Navigation</button>
             </div>
             <div class="legend">
                 <h4>Legend</h4>
@@ -241,6 +247,7 @@
         let map, markers = {}, currentRoute = null, activeBuilding = null, isSatellite = false;
         let routeLine = null, routeStartMarker = null, routeEndMarker = null;
         let userMarker = null, userPosition = null, locationWatchId = null, lastRouteData = null;
+        let voiceGuidanceEnabled = false, spokenInstructionIndex = -1, lastRerouteAt = 0, routeInFlight = false, pendingDestination = null;
 
         document.addEventListener('DOMContentLoaded', () => {
             initMap();
@@ -321,7 +328,7 @@
             document.getElementById('buildingsList').innerHTML = buildings.map(b => `<option value="${b.name}">`).join('');
         }
 
-        function getDirectionsTo(dest) { toggleDirections(); document.getElementById('toInput').value = dest; document.getElementById('fromInput').focus(); }
+        function getDirectionsTo(dest) { toggleDirections(); document.getElementById('toInput').value = dest; calculateRoute(); }
 
         function setLocationStatus(message, state = '') {
             const status = document.getElementById('locationStatus');
@@ -329,63 +336,132 @@
             status.innerHTML = `<i class="fas ${state === 'error' ? 'fa-triangle-exclamation' : state === 'success' ? 'fa-location-dot' : 'fa-location-crosshairs'}"></i><span>${message}</span>`;
         }
 
-        function calculateRoute() {
-            const fromName = document.getElementById('fromInput').value.trim();
-            const toName = document.getElementById('toInput').value.trim();
-            if (!toName) { alert('Please choose a destination.'); return; }
-            const from = (fromName.toLowerCase() === 'your location' || (!fromName && userPosition))
-                ? { name: 'Your location', lat: userPosition.lat, lng: userPosition.lng }
-                : buildings.find(b => b.name.toLowerCase() === fromName.toLowerCase());
-            const to = buildings.find(b => b.name.toLowerCase() === toName.toLowerCase());
-            if (!from) { alert('Choose a starting building or tap the location icon to use your current position.'); return; }
-            if (!to) { alert(`Building "${toName}" not found. Select a destination from the suggestions.`); return; }
-            clearRoute(false);
-            fetchRoute(from, to);
+        function toggleVoiceGuidance() {
+            voiceGuidanceEnabled = !voiceGuidanceEnabled;
+            const button = document.getElementById('voiceToggle');
+            if (!voiceGuidanceEnabled) window.speechSynthesis?.cancel();
+            button.innerHTML = voiceGuidanceEnabled
+                ? '<i class="fas fa-volume-high"></i> Voice on'
+                : '<i class="fas fa-volume-xmark"></i> Voice off';
+            if (voiceGuidanceEnabled && lastRouteData?.instructions?.length) speakInstruction(spokenInstructionIndex >= 0 ? spokenInstructionIndex : 0);
         }
 
-        async function fetchRoute(from, to) {
+        function speakInstruction(index) {
+            if (!lastRouteData?.instructions?.[index]) return;
+            spokenInstructionIndex = index;
+            const instruction = lastRouteData.instructions[index].instruction;
+            document.getElementById('currentStep').textContent = instruction;
+            if (!voiceGuidanceEnabled || !window.speechSynthesis) return;
+            window.speechSynthesis.cancel();
+            const utterance = new SpeechSynthesisUtterance(instruction);
+            utterance.lang = 'en-IN';
+            utterance.rate = 0.95;
+            utterance.pitch = 1;
+            window.speechSynthesis.speak(utterance);
+        }
+
+        function updateNavigationProgress() {
+            if (!lastRouteData || !userPosition) return;
+            const { path, instructions, to } = lastRouteData;
+            if (getDistance(userPosition.lat, userPosition.lng, to.lat, to.lng) < 0.025) {
+                document.getElementById('currentStep').textContent = `You have arrived at ${to.name}.`;
+                if (voiceGuidanceEnabled && spokenInstructionIndex !== instructions.length) {
+                    spokenInstructionIndex = instructions.length;
+                    window.speechSynthesis?.cancel();
+                    window.speechSynthesis?.speak(new SpeechSynthesisUtterance(`You have arrived at ${to.name}.`));
+                }
+                return;
+            }
+            if (!instructions.length) {
+                document.getElementById('currentStep').textContent = `Continue toward ${to.name}.`;
+                return;
+            }
+            let nearest = 0;
+            let nearestDistance = Infinity;
+            path.forEach((point, index) => {
+                const distance = getDistance(userPosition.lat, userPosition.lng, point[0], point[1]);
+                if (distance < nearestDistance) { nearest = index; nearestDistance = distance; }
+            });
+            const instructionIndex = Math.min(instructions.length - 1, Math.floor(nearest / Math.max(1, path.length) * instructions.length));
+            if (instructionIndex !== spokenInstructionIndex) speakInstruction(instructionIndex);
+            if (nearestDistance > 0.06 && Date.now() - lastRerouteAt > 10000 && !routeInFlight) {
+                lastRerouteAt = Date.now();
+                fetchRoute({ name: 'Your location', lat: userPosition.lat, lng: userPosition.lng }, to, true);
+            }
+        }
+
+        function calculateRoute() {
+            const toName = document.getElementById('toInput').value.trim();
+            if (!toName) { alert('Please choose a destination.'); return; }
+            const to = buildings.find(b => b.name.toLowerCase() === toName.toLowerCase());
+            if (!to) { alert(`Building "${toName}" not found. Select a destination from the suggestions.`); return; }
+            if (!userPosition) {
+                setLocationStatus('Getting your exact location…');
+                pendingDestination = to;
+                locateUser(true);
+                return;
+            }
+            clearRoute(false);
+            fetchRoute({ name: 'Your location', lat: userPosition.lat, lng: userPosition.lng }, to);
+        }
+
+        async function fetchRoute(from, to, isReroute = false) {
+            if (routeInFlight) return;
+            routeInFlight = true;
             const routeInfo = document.getElementById('routeInfo');
             routeInfo.classList.add('active');
-            document.getElementById('routeSourceNote').textContent = 'Finding the best walking path…';
+            if (!isReroute) document.getElementById('routeSourceNote').textContent = 'Finding the best walking path…';
             try {
                 const params = new URLSearchParams({ fromLat: from.lat, fromLng: from.lng, toLat: to.lat, toLng: to.lng });
                 const res = await fetch(`${API_BASE}/directions?${params}`, { headers: { Accept: 'application/json' } });
                 if (!res.ok) throw new Error(`Directions service returned ${res.status}`);
                 const data = await res.json();
-                drawRoute(data.path, from, to, data.distance, data.duration, data.steps, data.instructions, data.fallback);
+                drawRoute(data.path, from, to, data.distance, data.duration, data.steps, data.instructions, data.fallback, isReroute);
             } catch (error) {
                 console.warn(error);
                 const dist = getDistance(from.lat, from.lng, to.lat, to.lng);
                 const time = Math.max(1, Math.ceil(dist / 5 * 60));
                 const steps = Math.max(1, Math.ceil(dist * 1000 / 0.7));
-                drawRoute([[from.lat, from.lng], [to.lat, to.lng]], from, to, dist, time, steps, [], true);
+                drawRoute([[from.lat, from.lng], [to.lat, to.lng]], from, to, dist, time, steps, [], true, isReroute);
+            } finally {
+                routeInFlight = false;
             }
         }
 
-                function drawRoute(path, from, to, distance, duration, steps, instructions = [], fallback = false) {
+        function drawRoute(path, from, to, distance, duration, steps, instructions = [], fallback = false, isReroute = false) {
+            if (routeLine) map.removeLayer(routeLine);
+            if (routeStartMarker) map.removeLayer(routeStartMarker);
+            if (routeEndMarker) map.removeLayer(routeEndMarker);
             routeLine = L.polyline(path, { color: '#1a5f2a', weight: 6, opacity: 0.9, lineCap: 'round' }).addTo(map);
-            const startIcon = L.divIcon({ html: '<div style="background:#1a5f2a;color:white;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;border:3px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.3);"><i class="fas fa-play" style="font-size:0.6rem"></i></div>', iconSize: [28,28], iconAnchor: [14,14] });
+            const startIcon = L.divIcon({ html: '<div style="background:#1a5f2a;color:white;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;border:3px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.3);"><i class="fas fa-location-arrow" style="font-size:0.6rem"></i></div>', iconSize: [28,28], iconAnchor: [14,14] });
             const endIcon = L.divIcon({ html: '<div style="background:#dc2626;color:white;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;border:3px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.3);"><i class="fas fa-location-dot" style="font-size:0.7rem"></i></div>', iconSize: [28,28], iconAnchor: [14,14] });
-            routeStartMarker = L.marker([from.lat, from.lng], { icon: startIcon }).addTo(map).bindTooltip(from.name || 'Start');
+            routeStartMarker = L.marker([from.lat, from.lng], { icon: startIcon }).addTo(map).bindTooltip('Your live location');
             routeEndMarker = L.marker([to.lat, to.lng], { icon: endIcon }).addTo(map).bindTooltip(to.name || 'Destination');
             document.getElementById('routeDistance').textContent = `${Number(distance).toFixed(2)} km`;
             document.getElementById('routeTime').textContent = `${duration} min walk`;
             document.getElementById('routeSteps').textContent = `${Number(steps).toLocaleString()} steps`;
-            document.getElementById('routeSourceNote').textContent = fallback ? 'Approximate route: the walking router is temporarily unavailable.' : 'Walking route follows mapped roads and paths.';
+            document.getElementById('routeSourceNote').textContent = fallback ? 'Approximate route: the walking router is temporarily unavailable.' : (isReroute ? 'Route updated from your live location.' : 'Walking route follows mapped roads and paths.');
             const list = document.getElementById('routeInstructions');
-            list.innerHTML = instructions.length ? instructions.map(step => `<li>${step.instruction}${step.distance ? ` <small>(${step.distance} km)</small>` : ''}</li>`).join('') : '<li>Follow the highlighted path to your destination.</li>';
+            list.innerHTML = instructions.length ? instructions.map(step => `<li>${step.instruction}${step.distance ? ` <small>(${step.distance} km)</small>` : ''}</li>`).join('') : '<li>Continue toward your destination.</li>';
             lastRouteData = { from, to, path, instructions };
+            spokenInstructionIndex = -1;
             document.getElementById('routeInfo').classList.add('active');
-            map.fitBounds(routeLine.getBounds(), { padding: [50,50] });
+            document.getElementById('currentStep').textContent = instructions[0]?.instruction || `Continue toward ${to.name}.`;
+            if (!isReroute) map.fitBounds(routeLine.getBounds(), { padding: [50,50] });
+            if (voiceGuidanceEnabled && instructions.length) speakInstruction(0);
         }
         function clearRoute(hide = true) {
             if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
             if (routeStartMarker) { map.removeLayer(routeStartMarker); routeStartMarker = null; }
             if (routeEndMarker) { map.removeLayer(routeEndMarker); routeEndMarker = null; }
             lastRouteData = null;
+            pendingDestination = null;
+            spokenInstructionIndex = -1;
+            window.speechSynthesis?.cancel();
             if (hide) document.getElementById('routeInfo').classList.remove('active');
             document.getElementById('routeInstructions').innerHTML = '';
             document.getElementById('routeSourceNote').textContent = '';
+            document.getElementById('currentStep').textContent = 'Choose a destination to start navigation.';
         }
 
         function getDistance(lat1, lon1, lat2, lon2) {
@@ -396,14 +472,7 @@
             return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
         }
 
-        function useCurrentLocation() {
-            document.getElementById('fromInput').value = 'Your location';
-            if (userPosition) {
-                calculateRoute();
-                return;
-            }
-            locateUser(true);
-        }
+        function useCurrentLocation() { locateUser(true); }
 
         function handleLocationUpdate(pos, recenter = false) {
             const { latitude: lat, longitude: lng, accuracy } = pos.coords;
@@ -413,10 +482,12 @@
             if (recenter) map.flyTo([lat, lng], 18);
             const dist = getDistance(lat, lng, CAMPUS_CENTER[0], CAMPUS_CENTER[1]);
             setLocationStatus(`Live location active (±${Math.round(accuracy)} m)${dist > 0.8 ? ' · You appear outside campus' : ''}`, 'success');
-            const from = document.getElementById('fromInput').value.trim().toLowerCase();
-            if (from === 'your location') {
-                const selectedDestination = buildings.find(b => b.name.toLowerCase() === document.getElementById('toInput').value.trim().toLowerCase());
-                if (selectedDestination) fetchRoute({ name: 'Your location', lat, lng }, selectedDestination);
+            if (pendingDestination) {
+                const destination = pendingDestination;
+                pendingDestination = null;
+                fetchRoute({ name: 'Your location', lat, lng }, destination);
+            } else if (lastRouteData) {
+                updateNavigationProgress();
             }
         }
 
